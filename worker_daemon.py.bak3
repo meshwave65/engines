@@ -1,0 +1,185 @@
+import os
+import sys
+import time
+import re
+import urllib.parse
+from datetime import datetime
+from pathlib import Path
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+
+# ==============================
+# CONFIG
+# ==============================
+KNOWLEDGE_ROOT = "/mnt/hd1tb/projetos/_storage/knowledge"
+
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    USE_WDM = True
+except:
+    USE_WDM = False
+
+
+def get_provider_name(url):
+    try:
+        if 'grok' in url.lower() or 'x.ai' in url.lower():
+            return 'grok'
+        return re.search(r'https?://([^/]+)', url).group(1).split('.')[-2].lower()
+    except:
+        return "unknown"
+
+
+def clean_slug(raw_slug):
+    if not raw_slug:
+        return "sem-slug"
+    return re.sub(r'[^a-zA-Z0-9._-]', '_', raw_slug)[:100]
+
+
+def get_driver():
+    print("🚀 Iniciando driver...")
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1100")
+
+    if USE_WDM:
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
+
+    return webdriver.Chrome(options=options)
+
+
+def main():
+    # ==============================
+    # ARGS
+    # ==============================
+    if len(sys.argv) < 7:
+        print("❌ Uso: python universal_extractor.py <url> <user> <client> <llm> <agent> <task_id>")
+        sys.exit(1)
+
+    url = sys.argv[1].strip()
+    user_name = sys.argv[2]
+    client_id = sys.argv[3]
+    llm_provider = sys.argv[4]
+    agent = sys.argv[5]
+    task_id = sys.argv[6]
+
+    print(f"🔗 URL: {url}")
+    print(f"🏢 Client: {client_id}")
+    print(f"🤖 LLM: {llm_provider}")
+    print(f"👤 User: {user_name}")
+    print(f"🧠 Agent: {agent}")
+    print(f"🆔 Task: {task_id}")
+
+    # ==============================
+    # SLUG / TIMESTAMP
+    # ==============================
+    parsed = urllib.parse.urlparse(url)
+    raw_slug = parsed.path.strip('/').split('/')[-1] if parsed.path else ""
+    slug = clean_slug(raw_slug)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"{slug}.{ts}"
+
+    print(f"🆔 Slug: {slug}")
+    print(f"⏱️ Timestamp: {ts}")
+
+    # ==============================
+    # PATH FINAL
+    # ==============================
+    task_dir = (
+        Path(KNOWLEDGE_ROOT)
+        / client_id
+        / llm_provider
+        / user_name
+        / agent
+        / "tasks"
+        / task_id
+    )
+
+    print(f"📂 Caminho final: {task_dir}")
+
+    try:
+        task_dir.mkdir(parents=True, exist_ok=True)
+        print("✅ Diretório criado")
+    except Exception as e:
+        print(f"❌ Erro ao criar diretório: {e}")
+        sys.exit(1)
+
+    # ==============================
+    # DRIVER
+    # ==============================
+    driver = None
+
+    try:
+        driver = get_driver()
+
+        print("🌐 Acessando URL...")
+        driver.get(url)
+
+        print("⏳ Espera inicial...")
+        time.sleep(8)
+
+        print("🔄 Scroll profundo...")
+        for _ in range(5):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(2.2)
+
+        driver.execute_script("window.scrollTo(0, 0)")
+        time.sleep(5)
+
+        print("✅ Página estabilizada")
+
+        # ==============================
+        # EXTRAÇÃO
+        # ==============================
+        full_text = driver.find_element(By.TAG_NAME, "body").text[:50000]
+
+        links = []
+        for a in driver.find_elements(By.TAG_NAME, "a"):
+            href = a.get_attribute("href")
+            if href and href.startswith("http"):
+                links.append(href)
+
+        # ==============================
+        # SAVE FILES
+        # ==============================
+        with open(task_dir / f"{base_name}.context.txt", "w", encoding="utf-8") as f:
+            f.write(full_text or "NENHUM CONTEUDO ENCONTRADO")
+
+        with open(task_dir / f"{base_name}.links.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(set(links)) if links else "NENHUM CONTEUDO ENCONTRADO")
+
+        with open(task_dir / f"{base_name}.code.txt", "w", encoding="utf-8") as f:
+            f.write("NENHUM CONTEUDO ENCONTRADO")
+
+        with open(task_dir / f"{base_name}.reference_files.txt", "w", encoding="utf-8") as f:
+            f.write("NENHUM CONTEUDO ENCONTRADO")
+
+        driver.save_screenshot(str(task_dir / f"{base_name}.screenshot.png"))
+
+        print(f"✅ Arquivos salvos em:\n{task_dir}")
+
+    except Exception as e:
+        print(f"❌ ERRO: {e}")
+        import traceback
+        traceback.print_exc()
+
+        if driver:
+            try:
+                driver.save_screenshot(str(task_dir / f"ERROR_{ts}.png"))
+            except:
+                pass
+
+    finally:
+        if driver:
+            driver.quit()
+
+
+if __name__ == "__main__":
+    main()

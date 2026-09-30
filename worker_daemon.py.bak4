@@ -1,0 +1,169 @@
+import time
+import requests
+import subprocess
+import os
+import sys
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv("/mnt/hd1tb/projetos/.env")
+
+SUPABASE_URL = os.getenv("VITE_SUPABASE_URL")
+SUPABASE_KEY = os.getenv("VITE_SUPABASE_ANON_KEY")
+
+TABLE = "appsofia_tasks"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Nomes dos scripts conforme o ambiente
+SCRIPT_EXTRACTOR = os.path.join(BASE_DIR, "universal_extractor.py")
+SCRIPT_DOWNLOAD = os.path.join(BASE_DIR, "download_worker.py")
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+}
+
+
+# =========================
+# FETCH TASK
+# =========================
+def fetch_task():
+    # Busca tarefas STAGED para iniciar
+    url_staged = (
+        f"{SUPABASE_URL}/rest/v1/{TABLE}"
+        "?status=eq.STAGED"
+        "&order=created_at.asc"
+        "&limit=1"
+    )
+    r = requests.get(url_staged, headers=HEADERS, timeout=10)
+    if r.status_code == 200:
+        data = r.json()
+        if data:
+            return data[0]
+
+    # Busca tarefas ACQUIRED ou DELEGATED para monitorar progresso
+    # ACQUIRED: O worker já disparou os processos, mas eles ainda não começaram (ainda STAGED nos executores)
+    # DELEGATED: Pelo menos um executor já começou a trabalhar (mudou de STAGED para PROCESS ou similar)
+    url_monitor = (
+        f"{SUPABASE_URL}/rest/v1/{TABLE}"
+        "?status=in.(ACQUIRED,DELEGATED)"
+        "&order=created_at.asc"
+    )
+    r = requests.get(url_monitor, headers=HEADERS, timeout=10)
+    if r.status_code == 200:
+        data = r.json()
+        if data:
+            return data[0]
+
+    return None
+
+
+# =========================
+# UPDATE TASK
+# =========================
+def update(task_id, payload):
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/{TABLE}?id=eq.{task_id}"
+        payload["last_synced_at"] = datetime.now(timezone.utc).isoformat()
+        requests.patch(url, json=payload, headers=HEADERS, timeout=10)
+    except Exception as e:
+        print(f"⚠️ Erro ao atualizar tarefa {task_id}: {e}")
+
+
+# =========================
+# DISPATCH
+# =========================
+def dispatch(task):
+    task_id = task["id"]
+    print(f"▶️ DISPATCHING TASK {task_id}", flush=True)
+
+    # Passo 1: Marcar como ACQUIRED e resetar status dos executores
+    # O worker assume a tarefa, mas ela ainda não está "DELEGADA" (confirmada pelos executores)
+    update(task_id, {
+        "status": "ACQUIRED",
+        "extractor_status": "STAGED",
+        "downloader_status": "STAGED"
+    })
+
+    PYTHON_SYS = sys.executable
+    PYTHON_VENV = os.path.join(BASE_DIR, "venv", "bin", "python")
+    if not os.path.exists(PYTHON_VENV):
+        PYTHON_VENV = PYTHON_SYS
+
+    # Inicia EXTRACTOR
+    subprocess.Popen([PYTHON_SYS, SCRIPT_EXTRACTOR, str(task_id)])
+
+    # Inicia DOWNLOAD (apenas se for manus)
+    is_manus = (task.get("origin_provider", "").lower() == "manus")
+    if is_manus:
+        subprocess.Popen([PYTHON_VENV, SCRIPT_DOWNLOAD, str(task_id)])
+    else:
+        # Se não for manus, o downloader não tem o que fazer
+        update(task_id, {"downloader_status": "NOWORK"})
+    
+    print(f"📡 Processes spawned for {task_id}. Waiting for execution confirmation...", flush=True)
+
+
+# =========================
+# MONITOR
+# =========================
+def monitor(task):
+    task_id = task["id"]
+    status = task.get("status")
+    ext_status = task.get("extractor_status")
+    dwn_status = task.get("downloader_status")
+
+    # 1. Se qualquer um falhar, a tarefa inteira falha imediatamente
+    if ext_status == "FAIL" or dwn_status == "FAIL":
+        update(task_id, {"status": "FAIL"})
+        print(f"🚨 TASK {task_id} FAILED (Ext: {ext_status}, Dwn: {dwn_status})", flush=True)
+        return
+
+    # 2. Lógica de Transição para DELEGATED
+    # Só muda para DELEGATED se a tarefa estiver em ACQUIRED e pelo menos um executor saiu de STAGED
+    if status == "ACQUIRED":
+        ext_started = (ext_status not in ["STAGED", None])
+        dwn_started = (dwn_status not in ["STAGED", None])
+        
+        if ext_started or dwn_started:
+            update(task_id, {"status": "DELEGATED"})
+            print(f"📤 TASK {task_id} DELEGATED (Executors active)", flush=True)
+            return
+
+    # 3. Lógica de Conclusão
+    # Se ambos terminarem (DONE ou NOWORK), a tarefa é concluída
+    ext_done = (ext_status == "DONE")
+    dwn_done = (dwn_status in ["DONE", "NOWORK"])
+
+    if ext_done and dwn_done:
+        update(task_id, {"status": "DONE"})
+        print(f"✅ TASK {task_id} DONE", flush=True)
+
+
+# =========================
+# LOOP
+# =========================
+def run_worker():
+    print("🚀 WORKER ONLINE", flush=True)
+
+    while True:
+        try:
+            task = fetch_task()
+            if task:
+                if task["status"] == "STAGED":
+                    dispatch(task)
+                else:
+                    monitor(task)
+            
+            # Log discreto para não poluir
+            # print(".", end="", flush=True)
+        except Exception as e:
+            print(f"⚠️ Erro no loop do worker: {e}")
+            
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    run_worker()

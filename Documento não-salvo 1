@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""
+Manus Batch Downloader - Versão com Visualização de Cliques
+Ajuda a calibrar as coordenadas em tempo real
+"""
+
+import time
+import sys
+from pathlib import Path
+
+import pyautogui
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+
+# ====================== CONFIG ======================
+KNOWLEDGE_ROOT = Path("/mnt/hd1tb/projetos/_storage/knowledge")
+CLIENTE = "meshwave65"
+USER_DIR = "meshwave65"
+
+# COORDENADAS INICIAIS (você vai ajustar)
+COORDS = {
+    "pastinha": (1132, 166),      # Clique 1
+    "setinha":  (863, 263),       # Clique 2
+    "lote":     (844, 868)        # Clique 3
+}
+
+
+def get_driver():
+    print("🚀 Iniciando Chrome via Selenium...")
+    options = Options()
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--start-maximized")
+    options.add_argument("--window-size=1920,1080")
+
+    driver = webdriver.Chrome(options=options)
+    print("✅ Chrome aberto!")
+    return driver
+
+
+def highlight_click(x, y, label):
+    """Mostra visualmente onde vai clicar"""
+    print(f"→ Movendo para {label}: ({x}, {y})")
+    pyautogui.moveTo(x, y, duration=1.5)
+    # Pequeno destaque visual
+    pyautogui.moveRel(0, 0, duration=0.3)
+    time.sleep(1)
+
+
+def main(manus_url: str):
+    print(f"🔗 URL: {manus_url}\n")
+
+    driver = None
+    try:
+        driver = get_driver()
+        driver.get(manus_url)
+
+        print("⏳ Aguardando carregamento da página da Manus...")
+        time.sleep(10)
+
+        print("\n" + "="*70)
+        print("CALIBRAÇÃO DE CLIQUES - Siga as instruções")
+        print("="*70)
+
+        # === Teste Clique 1 - Pastinha ===
+        highlight_click(*COORDS["pastinha"], "PASTINHA COM LUPA")
+        input("Clique 1 feito? Ajuste COORDS['pastinha'] se necessário e pressione ENTER...")
+
+        # === Teste Clique 2 - Setinha ===
+        highlight_click(*COORDS["setinha"], "SETINHA PARA BAIXO (ao lado do X)")
+        input("Clique 2 feito? Ajuste COORDS['setinha'] se necessário e pressione ENTER...")
+
+        # === Teste Clique 3 - Download em Lote ===
+        highlight_click(*COORDS["lote"], "BOTÃO DOWNLOAD EM LOTE")
+        input("Clique 3 feito? Ajuste COORDS['lote'] se necessário e pressione ENTER...")
+
+        print("\n🎯 Teste de calibração concluído!")
+        print("Se os cliques estiverem corretos, podemos automatizar o processo completo.")
+
+    except Exception as e:
+        print(f"❌ Erro: {e}")
+    finally:
+        if driver:
+            input("\nPressione ENTER para fechar o navegador...")
+            driver.quit()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Uso: python download_worker.py <URL>")
+        sys.exit(1)
+
+    url = sys.argv[1].strip()
+    main(url)

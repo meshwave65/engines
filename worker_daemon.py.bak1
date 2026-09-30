@@ -1,0 +1,173 @@
+import time
+import requests
+import subprocess
+import os
+import sys
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+# ==============================
+# ENV
+# ==============================
+load_dotenv("/mnt/hd1tb/projetos/.env")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise Exception("❌ ENV não carregado: SUPABASE_URL ou SUPABASE_KEY ausentes")
+
+# ==============================
+# CONFIG
+# ==============================
+TABLE = "appsofia_tasks"
+WORKER_ID = "worker_universal_1"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+SCRIPT_EXTRACTOR = os.path.join(BASE_DIR, "universal_extractor.py")
+SCRIPT_MANUS_DOWNLOAD = os.path.join(BASE_DIR, "download_worker.py")   # caminho relativo
+
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
+
+# ==============================
+# CLAIM TASK
+# ==============================
+def claim_task():
+    try:
+        print("🔄 checking tasks...", end=" ", flush=True)
+
+        url = f"{SUPABASE_URL}/rest/v1/{TABLE}?status=eq.STAGED&limit=1"
+
+        payload = {
+            "status": "PROCESS",
+            "device_id": WORKER_ID,
+            "last_synced_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        r = requests.patch(url, json=payload, headers=HEADERS)
+        print(f"📡 {r.status_code}")
+
+        if r.status_code == 200:
+            data = r.json()
+            if data:
+                print("🔒 TASK:", data[0]["id"])
+                return data[0]
+
+        return None
+
+    except Exception as e:
+        print("claim error:", e)
+        return None
+
+
+# ==============================
+# UPDATE STATUS
+# ==============================
+def update_status(task_id, status):
+    url = f"{SUPABASE_URL}/rest/v1/{TABLE}?id=eq.{task_id}"
+    payload = {
+        "status": status,
+        "last_synced_at": datetime.now(timezone.utc).isoformat()
+    }
+    requests.patch(url, json=payload, headers=HEADERS)
+
+
+# ==============================
+# RUN EXTRACTOR (Universal)
+# ==============================
+def run_extractor(url, user_name):
+    try:
+        print(f"🔧 Rodando universal_extractor.py para: {url}")
+        r = subprocess.run(
+            [sys.executable, SCRIPT_EXTRACTOR, url, user_name],
+            capture_output=True,
+            text=True,
+            timeout=600
+        )
+        print(r.stdout)
+        if r.stderr:
+            print("STDERR:", r.stderr)
+        return r.returncode == 0
+    except Exception as e:
+        print(f"exec error (universal_extractor): {e}")
+        return False
+
+
+# ==============================
+# RUN MANUS DOWNLOADER
+# ==============================
+def run_manus_downloader(url):
+    try:
+        print(f"📥 Rodando download_worker.py (Manus Batch Downloader) para: {url}")
+        r = subprocess.run(
+            [sys.executable, SCRIPT_MANUS_DOWNLOAD, url],
+            capture_output=True,
+            text=True,
+            timeout=300   # 5 minutos máximo
+        )
+        print(r.stdout)
+        if r.stderr:
+            print("STDERR download:", r.stderr)
+        return r.returncode == 0
+    except Exception as e:
+        print(f"exec error (manus_downloader): {e}")
+        return False
+
+
+# ==============================
+# PROCESS TASK (PRINCIPAL)
+# ==============================
+def process_task(task):
+    task_id = task["id"]
+    user_name = task.get("user_name", "default")
+    url = task.get("full_url") or task.get("slug")
+
+    if not url.startswith("http"):
+        url = "https://manus.im/share/" + url
+
+    print(f"▶️ Processando task {task_id}")
+    print(f"   URL: {url}")
+    print(f"   User: {user_name}")
+
+    success = False
+
+    # 1. Sempre roda o universal_extractor
+    ok_extract = run_extractor(url, user_name)
+
+    # 2. Se for link da Manus, roda também o download em lote
+    if "manus.im" in url.lower():
+        print("🔍 Detectado link da Manus → Executando download em lote...")
+        ok_download = run_manus_downloader(url)
+        
+        success = ok_extract and ok_download
+    else:
+        success = ok_extract
+
+    if success:
+        update_status(task_id, "DONE")
+        print("✅ TASK CONCLUÍDA COM SUCESSO")
+    else:
+        update_status(task_id, "FAILED")
+        print("❌ TASK FALHOU")
+
+
+# ==============================
+# WORKER LOOP
+# ==============================
+def run_worker():
+    print("🚀 WORKER INICIADO - Universal + Manus Downloader")
+    while True:
+        task = claim_task()
+        if task:
+            process_task(task)
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    run_worker()

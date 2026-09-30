@@ -1,0 +1,124 @@
+import os
+import sys
+import time
+import urllib.parse
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+KNOWLEDGE_ROOT = "/mnt/hd1tb/projetos/_storage/knowledge"
+
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    USE_WDM = True
+except:
+    USE_WDM = False
+
+
+# ==============================
+# PROVIDER
+# ==============================
+def get_provider_name(url):
+    try:
+        domain = urllib.parse.urlparse(url).netloc
+        return domain.split('.')[-2].lower()
+    except:
+        return "unknown"
+
+
+# ==============================
+# DRIVER
+# ==============================
+def get_driver(download_dir):
+    print("🚀 Inicializando Selenium...")
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+
+    chrome_path = "/usr/bin/google-chrome"
+    if not os.path.exists(chrome_path):
+        raise RuntimeError("Chrome não encontrado")
+
+    options.binary_location = chrome_path
+
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    if USE_WDM:
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
+
+    return webdriver.Chrome(options=options)
+
+
+# ==============================
+# MAIN FIXED
+# ==============================
+def main():
+    if len(sys.argv) < 3:
+        print("❌ uso: url user")
+        sys.exit(1)
+
+    full_url = sys.argv[1]
+    user_name = sys.argv[2]
+
+    provider = get_provider_name(full_url)
+
+    base_dir = os.getcwd()
+    out_dir = os.path.join(base_dir, "KNOWLEDGE", user_name, provider)
+    os.makedirs(out_dir, exist_ok=True)
+
+    print(f"🚀 URL: {full_url}")
+    print(f"👤 USER: {user_name}")
+    print(f"📦 PROVIDER: {provider}")
+
+    driver = get_driver(out_dir)
+
+    try:
+        print("🌐 Abrindo página...")
+        driver.get(full_url)
+
+        WebDriverWait(driver, 25).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        for _ in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+
+        texts = driver.find_element(By.TAG_NAME, "body").text
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder = os.path.join(out_dir, ts)
+        os.makedirs(folder, exist_ok=True)
+
+        driver.save_screenshot(os.path.join(folder, "screen.png"))
+
+        with open(os.path.join(folder, "content.txt"), "w", encoding="utf-8") as f:
+            f.write(texts)
+
+        print("✅ OK")
+
+    except Exception as e:
+        print("❌ ERROR:", e)
+        driver.save_screenshot(os.path.join(out_dir, "error.png"))
+        sys.exit(1)
+
+    finally:
+        driver.quit()
+
+
+if __name__ == "__main__":
+    main()
