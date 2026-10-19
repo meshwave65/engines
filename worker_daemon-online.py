@@ -44,24 +44,18 @@ HEADERS = {
 # FETCH TASK
 # ============================================================
 
-def fetch_task():
+def fetch_task(status):
+    """Busca uma tarefa por estado, separando despacho de monitoramento."""
     url = (
         f"{SUPABASE_URL}/rest/v1/{TABLE}"
-        "?status=eq.STAGED"
+        f"?status=eq.{status}"
         "&order=created_at.asc"
         "&limit=1"
     )
-
-    r = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=10
-    )
-
-    if r.status_code == 200 and r.json():
-        return r.json()[0]
-
-    return None
+    response = requests.get(url, headers=HEADERS, timeout=10)
+    response.raise_for_status()
+    tasks = response.json()
+    return tasks[0] if tasks else None
 
 
 # ============================================================
@@ -114,13 +108,16 @@ def dispatch(task):
         }
     )
 
-    subprocess.Popen(
-        [
-            "bash",
-            SCRIPT_EXTRACTOR,
-            str(task_id)
-        ]
-    )
+    try:
+        subprocess.Popen(
+            ["bash", SCRIPT_EXTRACTOR, str(task_id)],
+            cwd=BASE_DIR,
+            close_fds=True
+        )
+    except Exception as exc:
+        print(f"❌ extractor spawn failed {task_id}: {exc}", flush=True)
+        update(task_id, {"status": "FAIL", "extractor_status": "FAIL"})
+        return
 
     print(
         f"📡 extractor spawned via shell {task_id}",
@@ -134,55 +131,28 @@ def dispatch(task):
 
 def monitor(task):
     task_id = task["id"]
-
     ext = task.get("extractor_status")
     dwn = task.get("downloader_status")
 
     if ext == "FAIL" or dwn == "FAIL":
-
-        update(
-            task_id,
-            {
-                "status": "FAIL"
-            }
-        )
-
-        print(
-            f"🚨 FAIL {task_id}",
-            flush=True
-        )
-
+        update(task_id, {"status": "FAIL"})
+        print(f"🚨 FAIL {task_id}", flush=True)
         return
 
-    if ext not in ["STAGED", None] or dwn not in ["STAGED", None]:
-
-        update(
-            task_id,
-            {
-                "status": "DELEGATED"
-            }
-        )
-
-        print(
-            f"📤 DELEGATED {task_id}",
-            flush=True
-        )
-
+    # PROCESS/STAGED indicam trabalho em andamento; não delegar prematuramente.
+    if ext in ("STAGED", "PROCESS", None):
         return
 
-    if ext == "DONE" and dwn in ["DONE", "NOWORK"]:
+    if ext == "DONE":
+        if dwn in ("DONE", "NOWORK"):
+            update(task_id, {"status": "DONE"})
+            print(f"✅ DONE {task_id}", flush=True)
+        elif dwn == "STAGED":
+            update(task_id, {"status": "DELEGATED"})
+            print(f"📤 DELEGATED {task_id}: aguardando downloader", flush=True)
+        return
 
-        update(
-            task_id,
-            {
-                "status": "DONE"
-            }
-        )
-
-        print(
-            f"✅ DONE {task_id}",
-            flush=True
-        )
+    print(f"⚠️ estado extractor desconhecido {task_id}: {ext}", flush=True)
 
 
 # ============================================================
@@ -190,48 +160,27 @@ def monitor(task):
 # ============================================================
 
 def run_worker():
+    print("🚀 WORKER ONLINE", flush=True)
+    print(f"📁 BASE_DIR: {BASE_DIR}", flush=True)
+    print(f"🔧 EXTRACTOR: {SCRIPT_EXTRACTOR}", flush=True)
+    print(f"🌐 SUPABASE_URL: {SUPABASE_URL}", flush=True)
 
-    print(
-        "🚀 WORKER ONLINE",
-        flush=True
-    )
-
-    print(
-        f"📁 BASE_DIR: {BASE_DIR}",
-        flush=True
-    )
-
-    print(
-        f"🔧 EXTRACTOR: {SCRIPT_EXTRACTOR}",
-        flush=True
-    )
-
-    print(
-        f"🌐 SUPABASE_URL: {SUPABASE_URL}",
-        flush=True
-    )
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("SUPABASE_URL e SUPABASE_KEY precisam estar configuradas")
+    if not os.path.isfile(SCRIPT_EXTRACTOR):
+        raise FileNotFoundError(f"Extractor script não encontrado: {SCRIPT_EXTRACTOR}")
 
     while True:
-
         try:
-
-            task = fetch_task()
-
-            if task:
-
-                if task["status"] == "STAGED":
-                    dispatch(task)
-
-                else:
-                    monitor(task)
-
-        except Exception as e:
-
-            print(
-                f"⚠️ loop error: {e}",
-                flush=True
-            )
-
+            active = fetch_task("ACQUIRED")
+            if active:
+                monitor(active)
+            else:
+                staged = fetch_task("STAGED")
+                if staged:
+                    dispatch(staged)
+        except Exception as exc:
+            print(f"⚠️ loop error: {exc}", flush=True)
         time.sleep(5)
 
 
