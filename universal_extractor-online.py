@@ -22,7 +22,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException
 
 
 print("🔥 EXTRACTOR ONLINE STARTED", flush=True)
@@ -459,17 +459,16 @@ def get_driver(task_id):
         False
     )
 
-    service = Service(
-        ChromeDriverManager().install()
-    )
-
-    return (
-        webdriver.Chrome(
-            service=service,
-            options=options
-        ),
-        user_data_dir
-    )
+    # Reutiliza Chromium e ChromeDriver instalados na imagem do container.
+    chromium_binary = os.getenv("CHROME_BINARY", shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"))
+    driver_binary = os.getenv("CHROMEDRIVER_PATH", shutil.which("chromedriver"))
+    if chromium_binary:
+        options.binary_location = chromium_binary
+    service = Service(executable_path=driver_binary) if driver_binary else Service()
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(45)
+    driver.set_script_timeout(30)
+    return driver, user_data_dir
 
 
 # =========================
@@ -610,172 +609,37 @@ def final_settle(driver):
 # =========================
 
 def extract_full(driver):
-
-    texts = []
-    links = []
-    codes = []
-    imgs = []
-
-    js = """
-    function collectAll(root, results) {
-        const walker = document.createTreeWalker(
-            root,
-            NodeFilter.SHOW_ELEMENT,
-            null,
-            false
-        );
-
-        let node = walker.nextNode();
-
-        while (node) {
-
-            const tag =
-                node.tagName.toLowerCase();
-
-            const txt =
-                node.innerText
-                    ? node.innerText.trim()
-                    : "";
-
-            if (txt)
-                results.texts.push(txt);
-
-            if (
-                tag === 'a'
-                && node.href
-            )
-                results.links.push(node.href);
-
-            if (
-                (tag === 'code' || tag === 'pre')
-                && txt
-            )
-                results.codes.push(txt);
-
-            if (
-                tag === 'img'
-                && node.src
-                && !node.src.startsWith('data:')
-            )
-                results.imgs.push(node.src);
-
-            if (node.shadowRoot) {
-
-                collectAll(
-                    node.shadowRoot,
-                    results
-                );
-            }
-
-            node = walker.nextNode();
-        }
-    }
-
-    const results = {
-        texts: [],
-        links: [],
-        codes: [],
-        imgs: []
-    };
-
-    collectAll(
-        document.body,
-        results
-    );
-
-    return results;
+    """Extrai o DOM em uma chamada JS para evitar milhares de comandos WebDriver."""
+    script = r"""
+    const out = {texts: [], links: [], codes: [], imgs: []};
+    if (!document.body) return out;
+    const bodyText = (document.body.innerText || "").trim();
+    if (bodyText) out.texts.push(bodyText);
+    const seenLinks = new Set();
+    document.querySelectorAll("a[href]").forEach(el => {
+      const href = el.href;
+      if (href && !seenLinks.has(href)) { seenLinks.add(href); out.links.push(href); }
+    });
+    document.querySelectorAll("pre, code").forEach(el => {
+      const value = (el.innerText || el.textContent || "").trim();
+      if (value) out.codes.push(value);
+    });
+    document.querySelectorAll("img[src]").forEach(el => {
+      const src = el.src;
+      if (src && !src.startsWith("data:")) out.imgs.push(src);
+    });
+    return out;
     """
-
     try:
-
         driver.switch_to.default_content()
-
-        elements = driver.find_elements(
-            By.XPATH,
-            "//*"
+        result = driver.execute_script(script) or {}
+        return tuple(
+            list(dict.fromkeys(result.get(key, [])))
+            for key in ("texts", "links", "codes", "imgs")
         )
-
-        for el in elements:
-
-            try:
-
-                tag = (
-                    el.tag_name.lower()
-                )
-
-                txt = el.text.strip()
-
-                if txt:
-                    texts.append(txt)
-
-                if tag == "a":
-
-                    href = el.get_attribute(
-                        "href"
-                    )
-
-                    if href:
-                        links.append(href)
-
-                if tag in [
-                    "code",
-                    "pre"
-                ]:
-
-                    codes.append(
-                        el.text.strip()
-                    )
-
-                if tag == "img":
-
-                    src = el.get_attribute(
-                        "src"
-                    )
-
-                    if (
-                        src
-                        and not src.startswith("data:")
-                    ):
-
-                        imgs.append(src)
-
-            except:
-
-                continue
-
-        js_results = driver.execute_script(
-            js
-        )
-
-        texts.extend(
-            js_results["texts"]
-        )
-
-        links.extend(
-            js_results["links"]
-        )
-
-        codes.extend(
-            js_results["codes"]
-        )
-
-        imgs.extend(
-            js_results["imgs"]
-        )
-
-    except Exception as e:
-
-        print(
-            f"⚠️ extraction error: {e}",
-            flush=True
-        )
-
-    return (
-        list(set(texts)),
-        list(set(links)),
-        list(set(codes)),
-        list(set(imgs))
-    )
+    except Exception as exc:
+        print(f"⚠️ extraction error: {exc}", flush=True)
+        return [], [], [], []
 
 
 # =========================
@@ -867,11 +731,16 @@ def main():
                 flush=True
             )
 
-            driver.get(url)
+            try:
+                driver.get(url)
+            except TimeoutException:
+                print("⚠️ navigation timeout; continuing with loaded DOM", flush=True)
+                try:
+                    driver.execute_script("window.stop();")
+                except Exception:
+                    pass
 
-            wait_page_ready(
-                driver
-            )
+            wait_page_ready(driver, timeout=20)
 
             handle_special_pages(
                 driver
@@ -881,9 +750,7 @@ def main():
                 driver
             )
 
-            wait_page_ready(
-                driver
-            )
+            wait_page_ready(driver, timeout=20)
 
             final_settle(
                 driver
