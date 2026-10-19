@@ -172,13 +172,16 @@ def run_worker():
 
     while True:
         try:
-            active = fetch_task("ACQUIRED")
-            if active:
-                monitor(active)
-            else:
-                staged = fetch_task("STAGED")
-                if staged:
-                    dispatch(staged)
+            # Cada consulta é independente: uma tarefa em andamento não bloqueia
+            # novas tarefas nem impede o acompanhamento das tarefas delegadas.
+            for state in ("ACQUIRED", "DELEGATED"):
+                task = fetch_task(state)
+                if task:
+                    monitor(task)
+
+            staged = fetch_task("STAGED")
+            if staged:
+                dispatch(staged)
         except Exception as exc:
             print(f"⚠️ loop error: {exc}", flush=True)
         time.sleep(5)
